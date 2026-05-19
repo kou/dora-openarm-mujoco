@@ -77,7 +77,8 @@ uv run dora run dataflow-dummy.yaml
 | `arm_left_observation` | `float32[8]` | Same for the left arm. |
 | `camera_wrist_right` | `uint8[N]` | JPEG frame, ~30 Hz. Requires `--render`. |
 | `camera_wrist_left` | `uint8[N]` | JPEG frame, ~30 Hz. Requires `--render`. |
-| `camera_head` | `uint8[N]` | JPEG frame, ~30 Hz. Requires `--render`. |
+| `camera_head_left` | `uint8[N]` | JPEG frame, ~30 Hz. Requires `--render`. |
+| `camera_head_right` | `uint8[N]` | JPEG frame, ~30 Hz. Requires `--render`. |
 | `camera_ceiling` | `uint8[N]` | JPEG frame, ~30 Hz. Requires `--render`. |
 
 Camera outputs carry `metadata={"encoding": "jpeg"}`.
