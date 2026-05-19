@@ -65,7 +65,7 @@ CLI arguments (set via ``args:`` in the dataflow YAML)
     MJCF scene file.  Defaults to the bundled openarm_cell scene.
 
 --scene NAME
-    Bundled scene to load when --xml is not set.  Choices: {cell, demo, pedestal, bimanual}.
+    Bundled scene to load when --xml is not set.  Choices: {cell, demo, pedestal}.
 
 --keyframe NAME  (default: "home")
     Name of the keyframe in the MJCF to reset to on startup.
@@ -112,7 +112,6 @@ _SCENE_RESOLVERS = {
     "cell":     openarm_mujoco.openarm_cell_xml,
     "demo":     openarm_mujoco.openarm_demo_xml,
     "pedestal": openarm_mujoco.openarm_pedestal_xml,
-    "bimanual": openarm_mujoco.openarm_bimanual_xml,
 }
 _DEFAULT_SCENE = "cell"
 _VIEWER_FPS    = 30
