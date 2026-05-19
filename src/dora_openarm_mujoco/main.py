@@ -64,6 +64,9 @@ CLI arguments (set via ``args:`` in the dataflow YAML)
 --xml PATH
     MJCF scene file.  Defaults to the bundled openarm_cell scene.
 
+--scene NAME
+    Bundled scene to load when --xml is not set.  Choices: {cell, demo, pedestal}.
+
 --keyframe NAME  (default: "home")
     Name of the keyframe in the MJCF to reset to on startup.
 
@@ -105,8 +108,13 @@ from openarm_mujoco_v2 import JointResolver
 from scipy.spatial.transform import Rotation
 from dora_openarm_mujoco._draw import draw_arrow, draw_frame, draw_world_frame
 
-_DEFAULT_XML  = openarm_mujoco.openarm_cell_xml()
-_VIEWER_FPS   = 30
+_SCENE_RESOLVERS = {
+    "cell":     openarm_mujoco.openarm_cell_xml,
+    "demo":     openarm_mujoco.openarm_demo_xml,
+    "pedestal": openarm_mujoco.openarm_pedestal_xml,
+}
+_DEFAULT_SCENE = "cell"
+_VIEWER_FPS    = 30
 _FRAME_DT     = 1.0 / _VIEWER_FPS
 
 # Arm control rate (matches quittable-tick-leader: 2ms = 500Hz)
@@ -348,7 +356,9 @@ def _run_loop(
 # ── model setup ────────────────────────────────────────────────────────────────
 
 def _setup_model(args) -> tuple[mujoco.MjModel, mujoco.MjData, JointResolver]:
-    model  = mujoco.MjModel.from_xml_path(args.xml)
+    xml_path = args.xml if args.xml is not None else _SCENE_RESOLVERS[args.scene]()
+    print(f"[model] Loading scene: {xml_path}")
+    model  = mujoco.MjModel.from_xml_path(xml_path)
     data   = mujoco.MjData(model)
     mapper = JointResolver(model)
 
@@ -384,8 +394,10 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Viewer dora node – MuJoCo renderer with camera output for OpenArm"
     )
-    p.add_argument("--xml", default=_DEFAULT_XML,
-                   help=f"MJCF scene file (default: {_DEFAULT_XML})")
+    p.add_argument("--xml", default=None,
+                   help="MJCF scene file. Overrides --scene when set.")
+    p.add_argument("--scene", choices=sorted(_SCENE_RESOLVERS), default=_DEFAULT_SCENE,
+                   help=f"Bundled scene to load when --xml is not set (default: {_DEFAULT_SCENE})")
     p.add_argument("--keyframe", "-k", default="home",
                    help="Initial keyframe name (default: home)")
     p.add_argument("--enable-collision", action="store_true",
