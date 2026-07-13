@@ -47,6 +47,14 @@ pose_right / pose_left : float32[7]
     VR controller pose as [x, y, z, qw, qx, qy, qz].  Only used for the
     ``--debug-frames`` overlay; ignored otherwise.
 
+button_x : bool[1]
+    X button state from the VR controller.  On press every scene joint
+    (anything other than the arms) is snapped back to the ``--keyframe``
+    pose (default: ``home``): freejoint objects as well as articulated
+    fixtures such as drawers and doors.
+    The trigger is edge-detected: the button must be released before the
+    next reset can fire.
+
 Outputs
 -------
 status : string["ready"]
@@ -175,6 +183,56 @@ def _get_arm_qpos(model: mujoco.MjModel, data: mujoco.MjData, side: str) -> np.n
     return q.astype(np.float32)
 
 
+# ── scene-object reset ─────────────────────────────────────────────────────────
+
+
+# Per joint type: (qpos width, qvel width).
+_JOINT_WIDTHS = {
+    mujoco.mjtJoint.mjJNT_FREE: (7, 6),
+    mujoco.mjtJoint.mjJNT_BALL: (4, 3),
+    mujoco.mjtJoint.mjJNT_SLIDE: (1, 1),
+    mujoco.mjtJoint.mjJNT_HINGE: (1, 1),
+}
+
+
+def _find_scene_joint_addrs(model: mujoco.MjModel) -> list[tuple[slice, slice, str]]:
+    """Find joints belonging to non-arm bodies.
+
+    Returns a list of ``(qpos_slice, qvel_slice, name)`` covering freejoint
+    objects and articulated fixtures (drawers, doors, ...).  Bodies whose name
+    starts with ``openarm_`` are skipped so the arms are never teleported.
+    """
+    addrs: list[tuple[slice, slice, str]] = []
+    for jnt_id in range(model.njnt):
+        body_id = int(model.jnt_bodyid[jnt_id])
+        body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
+        if body_name.startswith("openarm_"):
+            continue
+        nq, nv = _JOINT_WIDTHS[mujoco.mjtJoint(model.jnt_type[jnt_id])]
+        qpos_adr = int(model.jnt_qposadr[jnt_id])
+        qvel_adr = int(model.jnt_dofadr[jnt_id])
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, jnt_id) or body_name
+        addrs.append(
+            (slice(qpos_adr, qpos_adr + nq), slice(qvel_adr, qvel_adr + nv), name)
+        )
+    return addrs
+
+
+def _reset_scene_objects(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    key_id: int,
+    addrs: list[tuple[slice, slice, str]],
+) -> None:
+    """Snap each scene joint (arms excluded) back to its keyframe pose."""
+    if key_id < 0 or not addrs:
+        return
+    for qpos_sl, qvel_sl, _ in addrs:
+        data.qpos[qpos_sl] = model.key_qpos[key_id, qpos_sl]
+        data.qvel[qvel_sl] = 0.0
+    mujoco.mj_forward(model, data)
+
+
 # ── offscreen camera rendering ─────────────────────────────────────────────────
 
 
@@ -291,12 +349,15 @@ def _run_dora(
     viewer,
     data_lock: threading.Lock,
     stop_event: threading.Event,
+    reset_key_id: int,
+    object_addrs: list[tuple[slice, slice, str]],
     use_ctrl: bool = False,
     debug_frames: bool = False,
 ) -> None:
     print("[dora] Event loop started.")
     pose_right: np.ndarray | None = None
     pose_left: np.ndarray | None = None
+    button_x_prev = False
 
     try:
         for event in node:
@@ -330,6 +391,14 @@ def _run_dora(
                 pose_right = np.array(event["value"], dtype=np.float32)
             elif eid == "pose_left":
                 pose_left = np.array(event["value"], dtype=np.float32)
+            elif eid == "button_x":
+                pressed = bool(np.asarray(event["value"]).reshape(-1)[0])
+                if pressed and not button_x_prev:
+                    with _lock(viewer, data_lock):
+                        _reset_scene_objects(model, data, reset_key_id, object_addrs)
+                    names = ", ".join(name for _, _, name in object_addrs) or "(none)"
+                    print(f"[reset] button_x pressed → reset objects: {names}")
+                button_x_prev = pressed
 
             if viewer is not None and debug_frames:
                 with viewer.lock():
@@ -383,7 +452,11 @@ def _run_loop(
 # ── model setup ────────────────────────────────────────────────────────────────
 
 
-def _setup_model(args) -> tuple[mujoco.MjModel, mujoco.MjData, JointResolver]:
+def _setup_model(
+    args,
+) -> tuple[
+    mujoco.MjModel, mujoco.MjData, JointResolver, int, list[tuple[slice, slice, str]]
+]:
     xml_path = args.xml if args.xml is not None else _SCENE_RESOLVERS[args.scene]()
     print(f"[model] Loading scene: {xml_path}")
     model = mujoco.MjModel.from_xml_path(xml_path)
@@ -400,6 +473,7 @@ def _setup_model(args) -> tuple[mujoco.MjModel, mujoco.MjData, JointResolver]:
     if cell_id >= 0:
         model.geom_rgba[cell_id, 3] = 0.2
 
+    key_id = -1
     if args.keyframe:
         key_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, args.keyframe)
         if key_id >= 0:
@@ -415,7 +489,14 @@ def _setup_model(args) -> tuple[mujoco.MjModel, mujoco.MjData, JointResolver]:
         mapper.set_ctrl(data.ctrl, _get_arm_qpos(model, data, "right"), "right")
         mapper.set_ctrl(data.ctrl, _get_arm_qpos(model, data, "left"), "left")
 
-    return model, data, mapper
+    object_addrs = _find_scene_joint_addrs(model)
+    if object_addrs:
+        names = ", ".join(name for _, _, name in object_addrs)
+        print(f"[model] Resettable scene joints: {names}")
+    else:
+        print("[model] No non-arm scene joints found – button_x reset will be a no-op.")
+
+    return model, data, mapper, key_id, object_addrs
 
 
 # ── argument parsing ───────────────────────────────────────────────────────────
@@ -501,7 +582,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
-    model, data, mapper = _setup_model(args)
+    model, data, mapper, reset_key_id, object_addrs = _setup_model(args)
     frame_dt = 1.0 / target_fps
     steps_per_frame = max(1, math.ceil(frame_dt / model.opt.timestep))
     loop_dt = steps_per_frame * model.opt.timestep if args.ctrl else frame_dt
@@ -545,6 +626,8 @@ def main() -> None:
                     viewer,
                     data_lock,
                     stop_event,
+                    reset_key_id,
+                    object_addrs,
                     args.ctrl,
                     args.debug_frames,
                 ),
@@ -575,6 +658,8 @@ def main() -> None:
                 None,
                 data_lock,
                 stop_event,
+                reset_key_id,
+                object_addrs,
                 args.ctrl,
                 args.debug_frames,
             ),
